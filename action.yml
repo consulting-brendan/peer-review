@@ -32,6 +32,19 @@ inputs:
       ```diff
       {{ diff_content }}
       ```
+  base-sha:
+    description: 'The base commit SHA for the diff.'
+    required: true
+  head-sha:
+    description: 'The head commit SHA for the diff.'
+    required: true
+  pr-title:
+    description: 'The pull request title.'
+    required: true
+  pr-body:
+    description: 'The pull request body.'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -50,21 +63,17 @@ runs:
     - name: Get Changed Files and Diff
       id: get-diff
       shell: bash
-      env:
-        # Securely pass untrusted user input as environment variables
-        PR_TITLE: ${{ github.event.pull_request.title }}
-        PR_BODY: ${{ github.event.pull_request.body }}
       run: |
-        # Get list of changed files
-        CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | tr '\n' ' ')
+        # Get list of changed files using the new inputs
+        CHANGED_FILES=$(git diff --name-only ${{ inputs.base-sha }} ${{ inputs.head-sha }} | tr '\n' ' ')
         
         # Get the diff content, respecting the size limit
-        DIFF_CONTENT=$(git diff --unified=3 ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | head -c ${{ inputs.review-diff-limit }})
+        DIFF_CONTENT=$(git diff --unified=3 ${{ inputs.base-sha }} ${{ inputs.head-sha }} | head -c ${{ inputs.review-diff-limit }})
         
-        # Use simple string replacement for placeholders, leveraging environment variables for safety
+        # Use simple string replacement for placeholders
         FULL_PROMPT="${{ inputs.review-prompt }}"
-        FULL_PROMPT="${FULL_PROMPT/\{\{ pr_title \}\}/$PR_TITLE}"
-        FULL_PROMPT="${FULL_PROMPT/\{\{ pr_body \}\}/$PR_BODY}"
+        FULL_PROMPT="${FULL_PROMPT/\{\{ pr_title \}\}/${{ inputs.pr-title }}}"
+        FULL_PROMPT="${FULL_PROMPT/\{\{ pr_body \}\}/${{ inputs.pr-body }}}"
         FULL_PROMPT="${FULL_PROMPT/\{\{ changed_files \}\}/$CHANGED_FILES}"
         FULL_PROMPT="${FULL_PROMPT/\{\{ diff_content \}\}/$DIFF_CONTENT}"
 
