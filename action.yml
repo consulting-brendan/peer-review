@@ -50,8 +50,14 @@ runs:
       run: |
         set -euo pipefail
 
+        echo "=== DEBUG: Checking Git Repository ==="
+        if [ ! -d .git ]; then
+          echo "ERROR: .git directory not found. Did you forget actions/checkout with fetch-depth: 0?"
+          exit 1
+        fi
+
         echo "=== DEBUG: Git log HEAD ==="
-        git log -1 --oneline
+        git log -1 --oneline || true
 
         echo "=== DEBUG: Checking SHAs ==="
         echo "BASE_SHA=$BASE_SHA"
