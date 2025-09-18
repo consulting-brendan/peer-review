@@ -1,153 +1,131 @@
-# action.yml
-name: 'Gemini AI PR Review'
-description: 'A reusable GitHub Action for automated PR reviews using the Gemini API.'
-
+name: "Gemini PR Review Action"
+description: "Generates PR reviews using Gemini API"
 inputs:
-  gemini-api-key:
-    description: 'The Gemini API key to authenticate with the API.'
-    required: true
-  review-diff-limit:
-    description: 'The maximum character count for the diff content to be sent to Gemini.'
-    required: false
-    default: '8000'
-  review-prompt:
-    description: 'The custom prompt for the Gemini AI reviewer.'
-    required: false
-    default: |
-      You are an expert code reviewer. Please review the following pull request changes and provide a detailed analysis. Your review should be constructive and specific, and formatted in markdown.
-
-      Provide the following sections:
-      1. **Code Quality Assessment**: Rate the overall code quality (1-10) and explain your reasoning.
-      2. **Security Analysis**: Identify any potential security vulnerabilities or concerns.
-      3. **Performance Review**: Comment on performance implications of the changes.
-      4. **Best Practices**: Note any deviations from coding best practices and provide suggestions.
-      5. **Suggestions**: Provide specific, actionable improvement suggestions.
-      6. **Resources**: Include relevant documentation links or learning resources when applicable.
-
-      **Pull Request Title**: {{ pr_title }}
-      **Pull Request Description**: {{ pr_body }}
-      **Changed Files**: {{ changed_files }}
-
-      **Code Changes**:
-      ```diff
-      {{ diff_content }}
-      ```
-  base-sha:
-    description: 'The base commit SHA for the diff.'
-    required: true
-  head-sha:
-    description: 'The head commit SHA for the diff.'
-    required: true
   pr-title:
-    description: 'The pull request title.'
+    description: "Title of the PR"
     required: true
   pr-body:
-    description: 'The pull request body.'
+    description: "Body of the PR"
+    required: true
+  base-sha:
+    description: "Base commit SHA"
+    required: true
+  head-sha:
+    description: "Head commit SHA"
+    required: true
+  review-prompt:
+    description: "Review prompt template"
+    required: true
+  review-diff-limit:
+    description: "Character limit for the diff"
     required: false
-    default: ''
-
+    default: "60000"
+  gemini-api-key:
+    description: "Gemini API key"
+    required: true
 runs:
   using: "composite"
   steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Install jq
+    - name: Debug Inputs
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y jq
+        echo "=== DEBUG: Raw Inputs ==="
+        echo "PR Title: ${{ inputs.pr-title }}"
+        echo "PR Body: ${{ inputs.pr-body }}"
+        echo "Base SHA: ${{ inputs.base-sha }}"
+        echo "Head SHA: ${{ inputs.head-sha }}"
+        echo "Review Prompt: ${{ inputs.review-prompt }}"
+        echo "Diff Limit: ${{ inputs.review-diff-limit }}"
 
     - name: Get Changed Files and Diff
       id: get-diff
       shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        PR_TITLE: ${{ inputs.pr-title }}
+        PR_BODY: ${{ inputs.pr-body }}
+        REVIEW_PROMPT: ${{ inputs.review-prompt }}
+        REVIEW_DIFF_LIMIT: ${{ inputs.review-diff-limit }}
       run: |
-        # Get list of changed files using the new inputs
-        CHANGED_FILES=$(git diff --name-only ${{ inputs.base-sha }} ${{ inputs.head-sha }} | tr '\n' ' ')
-        
-        # Get the diff content, respecting the size limit
-        DIFF_CONTENT=$(git diff --unified=3 ${{ inputs.base-sha }} ${{ inputs.head-sha }} | head -c ${{ inputs.review-diff-limit }})
-        
-        # Use simple string replacement for placeholders
-        FULL_PROMPT="${{ inputs.review-prompt }}"
-        FULL_PROMPT="${FULL_PROMPT/\{\{ pr_title \}\}/${{ inputs.pr-title }}}"
-        FULL_PROMPT="${FULL_PROMPT/\{\{ pr_body \}\}/${{ inputs.pr-body }}}"
-        FULL_PROMPT="${FULL_PROMPT/\{\{ changed_files \}\}/$CHANGED_FILES}"
-        FULL_PROMPT="${FULL_PROMPT/\{\{ diff_content \}\}/$DIFF_CONTENT}"
+        set -euo pipefail
 
-        # Write the final prompt to a file to be used by jq
+        echo "=== DEBUG: Git log HEAD ==="
+        git log -1 --oneline
+
+        echo "=== DEBUG: Checking SHAs ==="
+        echo "BASE_SHA=$BASE_SHA"
+        echo "HEAD_SHA=$HEAD_SHA"
+
+        echo "=== DEBUG: Getting Changed Files ==="
+        if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+          echo "ERROR: Missing base or head SHA"
+          exit 1
+        fi
+        CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | tr '\n' ' ')
+        echo "Changed Files: $CHANGED_FILES"
+
+        echo "=== DEBUG: Getting Diff Content ==="
+        DIFF_CONTENT=$(git diff --unified=3 "$BASE_SHA" "$HEAD_SHA" | head -c "$REVIEW_DIFF_LIMIT")
+        echo "Diff Content (truncated to $REVIEW_DIFF_LIMIT chars):"
+        echo "$DIFF_CONTENT" | head -n 20
+        echo "--- (end of preview) ---"
+
+        echo "=== DEBUG: Building Final Prompt ==="
+        FULL_PROMPT="$REVIEW_PROMPT"
+        FULL_PROMPT="${FULL_PROMPT//\{\{ pr_title \}\}/$PR_TITLE}"
+        FULL_PROMPT="${FULL_PROMPT//\{\{ pr_body \}\}/$PR_BODY}"
+        FULL_PROMPT="${FULL_PROMPT//\{\{ changed_files \}\}/$CHANGED_FILES}"
+        FULL_PROMPT="${FULL_PROMPT//\{\{ diff_content \}\}/$DIFF_CONTENT}"
+
+        echo "=== DEBUG: Final Prompt Preview (first 40 lines) ==="
+        echo "$FULL_PROMPT" | head -n 40
+        echo "--- (end of preview) ---"
+
         echo "$FULL_PROMPT" > /tmp/final_prompt.txt
         echo "files_list=${CHANGED_FILES}" >> $GITHUB_OUTPUT
 
     - name: Call Gemini API
-      id: gemini-api
+      id: call-gemini
       shell: bash
+      env:
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
       run: |
-        echo "Making API call to Gemini..."
-        
-        # Create JSON payload using jq, loading the prompt from the temporary file
-        jq -n \
-          --argfile prompt /tmp/final_prompt.txt \
-          '{
-            "contents": [{
-              "parts": [{
-                "text": $prompt
-              }]
-            }],
-            "generationConfig": {
-              "temperature": 0.1,
-              "maxOutputTokens": 2048
-            }
-          }' > /tmp/payload.json
+        set -euo pipefail
 
-        RESPONSE=$(curl -s -X POST \
-          "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${{ inputs.gemini-api-key }}" \
+        echo "=== DEBUG: Checking Prompt File ==="
+        if [ ! -s /tmp/final_prompt.txt ]; then
+          echo "ERROR: Prompt file is empty or missing"
+          ls -l /tmp
+          exit 1
+        fi
+        wc -c /tmp/final_prompt.txt
+
+        echo "=== DEBUG: Sending Request to Gemini API ==="
+        RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$GEMINI_API_KEY" \
           -H "Content-Type: application/json" \
-          -d @/tmp/payload.json)
+          -d @<(jq -n --arg prompt "$(cat /tmp/final_prompt.txt)" '{contents:[{parts:[{text:$prompt}]}]}'))
 
-        echo "API Response received"
-        
-        # Check if response contains error
-        if echo "$RESPONSE" | jq -e '.error' > /dev/null; then
-          echo "API Error: $(echo "$RESPONSE" | jq -r '.error.message')"
-          REVIEW_TEXT="❌ Failed to generate AI review: $(echo "$RESPONSE" | jq -r '.error.message // "Unknown API error"')"
-        else
-          # Extract review text from JSON response
-          REVIEW_TEXT=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // "Failed to generate review"')
+        BODY=$(echo "$RESPONSE" | head -n -1)
+        STATUS=$(echo "$RESPONSE" | tail -n1)
+
+        echo "=== DEBUG: Gemini API Response Status ==="
+        echo "$STATUS"
+        echo "=== DEBUG: Gemini API Response Body (first 40 lines) ==="
+        echo "$BODY" | head -n 40
+        echo "--- (end of preview) ---"
+
+        if [ "$STATUS" -ne 200 ]; then
+          echo "ERROR: Gemini API call failed with status $STATUS"
+          exit 1
         fi
 
-        # Store review content for next step
-        # This syntax is still the recommended way to handle multiline outputs
-        echo "review_content<<EOF" >> $GITHUB_OUTPUT
-        echo "$REVIEW_TEXT" >> $GITHUB_OUTPUT
+        REVIEW=$(echo "$BODY" | jq -r '.candidates[0].content.parts[0].text')
+        echo "review<<EOF" >> $GITHUB_OUTPUT
+        echo "$REVIEW" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
 
-    - name: Post Review Comment
-      if: success()
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ github.token }}
-        script: |
-          // Use `core.getInput` to read the multiline output securely
-          const reviewContent = `${{ steps.gemini-api.outputs.review_content }}`;
-          await github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: `## 🤖 Gemini AI Code Review\n\n${reviewContent}\n\n---\n*This review was automatically generated by Gemini AI. Please consider this feedback alongside human review.*`
-          });
-          
-    - name: Add 'ai-reviewed' Label
-      if: success()
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ github.token }}
-        script: |
-          await github.rest.issues.addLabels({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            labels: ['ai-reviewed']
-          });
+        echo "=== DEBUG: Review Output Preview (first 40 lines) ==="
+        echo "$REVIEW" | head -n 40
+        echo "--- (end of preview) ---"
