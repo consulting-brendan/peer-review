@@ -53,40 +53,31 @@ runs:
         set -euo pipefail
 
         echo "=== DEBUG: Git log HEAD ==="
-        git log -1 --oneline
-
-        echo "=== DEBUG: Checking SHAs ==="
-        echo "BASE_SHA=$BASE_SHA"
-        echo "HEAD_SHA=$HEAD_SHA"
-
-        if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
-          echo "ERROR: Missing base or head SHA"
-          exit 1
-        fi
+        git log -1 --oneline || true
 
         echo "=== DEBUG: Getting Changed Files ==="
-        CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | tr '\n' ' ')
-        echo "Changed Files: $CHANGED_FILES"
+        CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || true)
+        echo "Changed Files:"
+        echo "$CHANGED_FILES"
 
         echo "=== DEBUG: Getting Diff Content ==="
-        DIFF_CONTENT=$(git diff --unified=3 "$BASE_SHA" "$HEAD_SHA" | head -c "$REVIEW_DIFF_LIMIT")
-        echo "Diff Content Preview (first 20 lines):"
+        DIFF_CONTENT=$(git diff --unified=3 "$BASE_SHA" "$HEAD_SHA" | head -c "$REVIEW_DIFF_LIMIT" || true)
+        echo "Diff Content Preview:"
         echo "$DIFF_CONTENT" | head -n 20
         echo "--- (end of preview) ---"
 
-        echo "=== DEBUG: Building Final Prompt ==="
         FULL_PROMPT="$REVIEW_PROMPT"
         FULL_PROMPT="${FULL_PROMPT//\{\{ pr_title \}\}/$PR_TITLE}"
         FULL_PROMPT="${FULL_PROMPT//\{\{ pr_body \}\}/$PR_BODY}"
         FULL_PROMPT="${FULL_PROMPT//\{\{ changed_files \}\}/$CHANGED_FILES}"
         FULL_PROMPT="${FULL_PROMPT//\{\{ diff_content \}\}/$DIFF_CONTENT}"
 
+        echo "=== DEBUG: Final Prompt Preview (first 40 lines) ==="
+        echo "$FULL_PROMPT" | head -n 40
+        echo "--- (end of preview) ---"
+
         echo "$FULL_PROMPT" > /tmp/final_prompt.txt
         echo "files_list=${CHANGED_FILES}" >> $GITHUB_OUTPUT
-
-        echo "=== DEBUG: Final Prompt Preview (first 40 lines) ==="
-        head -n 40 /tmp/final_prompt.txt
-        echo "--- (end of preview) ---"
 
     - name: Call Gemini API
       id: call-gemini
@@ -96,9 +87,13 @@ runs:
       run: |
         set -euo pipefail
 
+        echo "=== DEBUG: Checking Prompt File ==="
         if [ ! -s /tmp/final_prompt.txt ]; then
-          echo "ERROR: Prompt file is empty or missing"
-          exit 1
+          REVIEW="❌ ERROR: Prompt file is empty or missing."
+          echo "review<<EOF" >> $GITHUB_OUTPUT
+          echo "$REVIEW" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          exit 0
         fi
 
         echo "=== DEBUG: Sending Request to Gemini API ==="
@@ -117,13 +112,17 @@ runs:
         echo "--- (end of preview) ---"
 
         if [ "$STATUS" -ne 200 ]; then
-          REVIEW="❌ Gemini API call failed with status $STATUS\n\nResponse Preview:\n\`\`\`\n$(echo "$BODY" | head -n 40)\n\`\`\`"
+          REVIEW="❌ Gemini API call failed with status $STATUS\n\nResponse preview:\n\`\`\`\n$(echo "$BODY" | head -n 20)\n\`\`\`"
         else
           REVIEW=$(echo "$BODY" | jq -r '.candidates[0].content.parts[0].text // empty')
           if [ -z "$REVIEW" ]; then
-            REVIEW="⚠ Gemini returned no review text.\n\nPossible causes:\n- Diff was empty or exceeded limit\n- Invalid prompt formatting\n- Gemini service gave no output\n\nPlease check workflow logs."
+            REVIEW="⚠ Gemini returned no review text.\n\nPossible causes:\n- Empty diff or exceeded limit\n- Invalid prompt\n- Gemini service issue"
           fi
         fi
+
+        echo "=== DEBUG: Final REVIEW value ==="
+        echo "$REVIEW" | head -n 40
+        echo "--- (end of preview) ---"
 
         echo "review<<EOF" >> $GITHUB_OUTPUT
         echo "$REVIEW" >> $GITHUB_OUTPUT
