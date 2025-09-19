@@ -1,5 +1,6 @@
 name: "Gemini PR Review Action"
 description: "Generates PR reviews using Gemini API"
+
 inputs:
   pr-title:
     description: "Title of the PR"
@@ -23,6 +24,7 @@ inputs:
   gemini-api-key:
     description: "Gemini API key"
     required: true
+
 runs:
   using: "composite"
   steps:
@@ -50,30 +52,25 @@ runs:
       run: |
         set -euo pipefail
 
-        echo "=== DEBUG: Checking Git Repository ==="
-        if [ ! -d .git ]; then
-          echo "ERROR: .git directory not found. Did you forget actions/checkout with fetch-depth: 0?"
-          exit 1
-        fi
-
         echo "=== DEBUG: Git log HEAD ==="
-        git log -1 --oneline || true
+        git log -1 --oneline
 
         echo "=== DEBUG: Checking SHAs ==="
         echo "BASE_SHA=$BASE_SHA"
         echo "HEAD_SHA=$HEAD_SHA"
 
-        echo "=== DEBUG: Getting Changed Files ==="
         if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
           echo "ERROR: Missing base or head SHA"
           exit 1
         fi
+
+        echo "=== DEBUG: Getting Changed Files ==="
         CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | tr '\n' ' ')
         echo "Changed Files: $CHANGED_FILES"
 
         echo "=== DEBUG: Getting Diff Content ==="
         DIFF_CONTENT=$(git diff --unified=3 "$BASE_SHA" "$HEAD_SHA" | head -c "$REVIEW_DIFF_LIMIT")
-        echo "Diff Content (truncated to $REVIEW_DIFF_LIMIT chars):"
+        echo "Diff Content Preview (first 20 lines):"
         echo "$DIFF_CONTENT" | head -n 20
         echo "--- (end of preview) ---"
 
@@ -84,12 +81,12 @@ runs:
         FULL_PROMPT="${FULL_PROMPT//\{\{ changed_files \}\}/$CHANGED_FILES}"
         FULL_PROMPT="${FULL_PROMPT//\{\{ diff_content \}\}/$DIFF_CONTENT}"
 
-        echo "=== DEBUG: Final Prompt Preview (first 40 lines) ==="
-        echo "$FULL_PROMPT" | head -n 40
-        echo "--- (end of preview) ---"
-
         echo "$FULL_PROMPT" > /tmp/final_prompt.txt
         echo "files_list=${CHANGED_FILES}" >> $GITHUB_OUTPUT
+
+        echo "=== DEBUG: Final Prompt Preview (first 40 lines) ==="
+        head -n 40 /tmp/final_prompt.txt
+        echo "--- (end of preview) ---"
 
     - name: Call Gemini API
       id: call-gemini
@@ -99,13 +96,10 @@ runs:
       run: |
         set -euo pipefail
 
-        echo "=== DEBUG: Checking Prompt File ==="
         if [ ! -s /tmp/final_prompt.txt ]; then
           echo "ERROR: Prompt file is empty or missing"
-          ls -l /tmp
           exit 1
         fi
-        wc -c /tmp/final_prompt.txt
 
         echo "=== DEBUG: Sending Request to Gemini API ==="
         RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
@@ -123,15 +117,14 @@ runs:
         echo "--- (end of preview) ---"
 
         if [ "$STATUS" -ne 200 ]; then
-          echo "ERROR: Gemini API call failed with status $STATUS"
-          exit 1
+          REVIEW="❌ Gemini API call failed with status $STATUS\n\nResponse Preview:\n\`\`\`\n$(echo "$BODY" | head -n 40)\n\`\`\`"
+        else
+          REVIEW=$(echo "$BODY" | jq -r '.candidates[0].content.parts[0].text // empty')
+          if [ -z "$REVIEW" ]; then
+            REVIEW="⚠ Gemini returned no review text.\n\nPossible causes:\n- Diff was empty or exceeded limit\n- Invalid prompt formatting\n- Gemini service gave no output\n\nPlease check workflow logs."
+          fi
         fi
 
-        REVIEW=$(echo "$BODY" | jq -r '.candidates[0].content.parts[0].text')
         echo "review<<EOF" >> $GITHUB_OUTPUT
         echo "$REVIEW" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
-
-        echo "=== DEBUG: Review Output Preview (first 40 lines) ==="
-        echo "$REVIEW" | head -n 40
-        echo "--- (end of preview) ---"
